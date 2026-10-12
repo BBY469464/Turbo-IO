@@ -1,0 +1,85 @@
+name: Build iOS addon (manual)
+
+# Produces an addon library, not an installable or signed IPA.
+# The final signed app Bundle ID must exactly match target_bundle_id.
+on:
+  workflow_dispatch:
+    inputs:
+      target_bundle_id:
+        description: 'Exact final signed app Bundle ID; rebuild if signing changes it'
+        required: true
+        default: 'com.rayneo.venus.pub'
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 20
+    env:
+      TARGET_BUNDLE_ID: ${{ inputs.target_bundle_id }}
+      TIO_AMAP_ENABLED: '0'
+      TIO_OTA_RESEARCH_ENABLED: '0'
+      TIO_NATIVE_NAV: '0'
+      TIO_MUSIC: '0'
+      TIO_LOCAL_TRANSLATION: '0'
+      TIO_CLASSIC_BINDINGS: '1'
+    steps:
+      - name: Check out inspected source revision
+        uses: actions/checkout@v4
+        with:
+          ref: c8815c0b2ff9db3bcdaeeb75abb3ca0e42251efb
+          persist-credentials: false
+
+      - name: Check target and Xcode
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$TARGET_BUNDLE_ID" =~ ^[A-Za-z0-9][A-Za-z0-9.-]+\.[A-Za-z0-9.-]+$ ]]; then
+            echo 'Invalid target Bundle ID' >&2
+            exit 2
+          fi
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+          git rev-parse HEAD
+
+      - name: Build embedded addon
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash official-addon/build.sh embedded "$TARGET_BUNDLE_ID"
+          test -s official-addon/build/embedded/TurboIOPrivateAddon.dylib
+          codesign --verify --strict official-addon/build/embedded/TurboIOPrivateAddon.dylib
+          python3 - <<'PY'
+          import hashlib, json, os, pathlib, subprocess
+          folder = pathlib.Path('official-addon/build/embedded')
+          binary = folder / 'TurboIOPrivateAddon.dylib'
+          metadata = {
+              'status': 'ADDON_ONLY_NOT_AN_INSTALLABLE_IPA',
+              'source_commit': subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip(),
+              'target_bundle_id': os.environ['TARGET_BUNDLE_ID'],
+              'sha256': hashlib.sha256(binary.read_bytes()).hexdigest(),
+              'signature': 'ad-hoc build signature; device provisioning still required',
+              'local_translation_included': False,
+              'experimental_firmware_included': False,
+          }
+          (folder / 'build-metadata.json').write_text(json.dumps(metadata, indent=2) + '\n', encoding='utf-8')
+          PY
+          {
+            echo '### Addon built; phone installation remains unverified'
+            echo 'Download ios-addon-library below. It contains a dylib, not an IPA.'
+            echo 'Match the final signed app Bundle ID to build-metadata.json before installation.'
+            echo 'This build includes no optional local translation or experimental firmware.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload addon and build metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-addon-library
+          path: |
+            official-addon/build/embedded/TurboIOPrivateAddon.dylib
+            official-addon/build/embedded/build-metadata.json
+          if-no-files-found: error
+          retention-days: 7
